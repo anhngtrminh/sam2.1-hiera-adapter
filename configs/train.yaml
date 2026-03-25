@@ -1,0 +1,162 @@
+# =============================================================================
+# CDW-Seg  —  COCO training configuration
+# =============================================================================
+# Single source of truth: edit `classes` here only.
+# num_classes in model.args is set automatically by train.py.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Class definitions  (order = contiguous index; index 0 = background)
+# -----------------------------------------------------------------------------
+classes:
+  - background            # 0  — always first; ignored in loss when ignore_bg: true
+  - bin                   # 1
+  - concrete_bricks_tiles # 2
+  - soils                 # 3
+  - green_waste_timber    # 4
+  - plastic               # 5  
+  - metals_e_waste        # 6
+  - non_recyclable_waste  # 7
+  - cardboard             # 8
+  - plaster_board         # 9
+  # Uncomment when fine-tune labelled data is available:
+  # - paint_can           # 10  
+  # - needles_syringes    # 11
+  # - dead_animal         # 12
+
+ignore_bg: false
+
+# -----------------------------------------------------------------------------
+# Step 1 — Dataset preparation  (python train.py --prepare-only)
+# Remove or comment out this block once splits have been created.
+# -----------------------------------------------------------------------------
+split_preparation:
+  source_dir:    cdw_coco
+
+  source_images_subdir:  images        # ← already correct
+  source_ann_file:  annotations.json  # ← point directly to this
+
+  train_ratio: 0.80
+  val_ratio:   0.10
+  test_ratio:  0.10
+  split_seed:  42
+
+coco:
+  coco_root: cdw_coco_retrain         # ← output will be written here
+
+# -----------------------------------------------------------------------------
+# Step 2 — COCO dataset root  (produced by Step 1)
+# -----------------------------------------------------------------------------
+coco:
+  coco_root: cdw_coco   # output of prepare_coco_splits()
+  # ann_file is inferred as  annotations/instances_<split>.json
+  # Override per split if needed:
+  # train_ann_file: annotations/instances_train.json
+  # val_ann_file:   annotations/instances_val.json
+
+# -----------------------------------------------------------------------------
+# Input / augmentation
+# -----------------------------------------------------------------------------
+inp_size:   512
+augment:    false   # applied to train split only
+
+# -----------------------------------------------------------------------------
+# DataLoader
+# -----------------------------------------------------------------------------
+batch_size:  1
+num_workers: 0     # set 0 on Windows
+
+# Gradient accumulation  (effective batch = batch_size × accum_steps)
+accum_steps: 16
+grad_checkpoint: true
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+sam_checkpoint: pretrained/sam2.1_hiera_large.pt # 1_hiera_large.pt  # 1_hiera_base_plus.pt
+
+# SAM2.1_hiera_large.pt parameters
+model:
+  name: sam
+  args:
+    # num_classes is injected automatically — do not set manually
+    num_classes: 10
+    inp_size: 512
+    loss: iou
+    encoder_mode:
+      name: sam
+      stages: [2, 6, 36, 4]
+      global_att_blocks: [23, 33, 43]
+      window_pos_embed_bkg_spatial_size: [7, 7]
+      window_spec: [8, 4, 16, 8]
+      num_pos_feats: 256
+      normalize: true
+      scale: null
+      temperature: 10000
+      d_model: 256
+      backbone_channel_list: [1152, 576, 288, 144]
+      fpn_top_down_levels: [2, 3]
+      fpn_interp_model: nearest
+      img_size: 256
+      mlp_ratio: 4
+      patch_size: 16
+      qkv_bias: true
+      use_rel_pos: true
+      window_size: 14
+      out_chans: 256
+      scale_factor: 32
+      input_type: fft
+      freq_nums: 0.25
+      prompt_type: highpass
+      prompt_embed_dim: 256
+      tuning_stage: 1234
+      handcrafted_tune: true
+      embedding_tune: true
+      adaptor: adaptor
+      embed_dim: 144
+      depth: 32
+      num_heads: 2
+      global_attn_indexes: [7, 15, 23, 31]
+
+# -----------------------------------------------------------------------------
+# Optimisation
+# -----------------------------------------------------------------------------
+optimizer:
+  name: adamw
+  args:
+    lr: 0.0002
+    weight_decay: 0.01
+
+lr_min:        1.0e-7
+freeze_encoder: true    # freeze SAM image encoder; only adapters are trained
+
+# Mixed precision  (set false on CPU)
+use_amp: true
+
+# -----------------------------------------------------------------------------
+# Training loop
+# -----------------------------------------------------------------------------
+epoch_max:  5
+epoch_val:  1      # validate every N epochs
+epoch_save: 2      # save 'last' checkpoint every N epochs
+
+early_stopping:
+  patience:  10    # epochs without mIoU improvement; set null to disable
+  min_delta: 0.001
+
+# Resume training from a checkpoint:
+# resume:      save/my_run/model_epoch_last.pth
+# start_epoch: 61
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+eval_type: seg
+
+data_norm:
+  inp:
+    sub: [0.5]
+    div: [0.5]
+  gt:
+    sub: [0.5]
+    div: [0.5]
