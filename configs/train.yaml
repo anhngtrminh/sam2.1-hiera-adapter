@@ -97,7 +97,7 @@ model:
       backbone_channel_list: [1152, 576, 288, 144]
       fpn_top_down_levels: [2, 3]
       fpn_interp_model: nearest
-      img_size: 256
+      img_size: 512
       mlp_ratio: 4
       patch_size: 16
       qkv_bias: true
@@ -136,7 +136,7 @@ use_amp: true
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
-epoch_max:  5
+epoch_max:  20
 epoch_val:  1      # validate every N epochs
 epoch_save: 2      # save 'last' checkpoint every N epochs
 

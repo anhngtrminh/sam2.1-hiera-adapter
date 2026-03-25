@@ -71,10 +71,10 @@ data_norm:
 model:
   name: sam
   args:
-    num_classes: 11
+    num_classes: 10
     inp_size: 1024
     loss: iou
-     loss_weight : [1,1,1,1,1,1,1,1,1,1,1]
+    # loss_weight : [1,1,1,1,1,1,1,1,1,1,1]
     encoder_mode:
       name: sam
       stages: [2, 6, 36, 4]
