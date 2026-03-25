@@ -1,4 +1,4 @@
-# CDW-Seg
+# SAM2.1_HIERA_LARGE ADAPTER
 
 Semantic segmentation of **Construction and Demolition Waste (CDW)** built on top of [SAM 2.1](https://github.com/facebookresearch/segment-anything-2) (Segment Anything Model 2.1). The image encoder backbone (Hiera) is frozen and extended with lightweight FFT-based prompt adapters, so only a small fraction of parameters are trained (~5M of 225M).
 
@@ -13,7 +13,6 @@ Semantic segmentation of **Construction and Demolition Waste (CDW)** built on to
 - [Setup](#setup)
 - [Dataset Preparation](#dataset-preparation)
 - [Training](#training)
-- [Configuration Reference](#configuration-reference)
 - [Checkpoints](#checkpoints)
 - [Evaluation Metrics](#evaluation-metrics)
 - [Multi-GPU Training](#multi-gpu-training)
