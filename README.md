@@ -8,7 +8,6 @@ Semantic segmentation of **Construction and Demolition Waste (CDW)** built on to
 
 - [Overview](#overview)
 - [Supported Classes](#supported-classes)
-- [Project Structure](#project-structure)
 - [Requirements](#requirements)
 - [Setup](#setup)
 - [Dataset Preparation](#dataset-preparation)
@@ -48,42 +47,6 @@ Training uses standard COCO-format instance annotations which are automatically 
 | 9 | plaster\_board |
 
 Additional classes (`paint_can`, `needles_syringes`, `dead_animal`) can be enabled in the config once labelled data is available.
-
----
-
-## Project Structure
-
-```
-.
-├── finetune.py                          # Main training script
-├── configs/
-│   └── train.yaml                       # Training configuration
-├── models/
-│   ├── sam.py                           # SAM model wrapper (SAM class)
-│   ├── sam2/
-│   │   └── modeling/
-│   │       └── backbones/
-│   │           ├── hieradet.py          # Hiera backbone + PromptGenerator adapters
-│   │           └── image_encoder.py     # ImageEncoder (trunk + FPN neck)
-│   └── mmseg/
-│       └── models/
-│           └── sam/
-│               └── mask_decoder.py      # Two-way transformer mask decoder
-├── pretrained/
-│   └── sam2.1_hiera_large.pt            # SAM 2.1 pre-trained weights (download separately)
-├── cdw_coco/                            # Dataset root (produced by prepare step)
-│   ├── images/
-│   │   ├── train/
-│   │   ├── val/
-│   │   └── test/
-│   └── annotations/
-│       ├── instances_train.json
-│       ├── instances_val.json
-│       └── instances_test.json
-├── save/                                # Training outputs (checkpoints, logs, TensorBoard)
-├── eval_iou.py                          # Segmentation metrics
-└── utils.py                             # Logging, optimiser factory, timer
-```
 
 ---
 
