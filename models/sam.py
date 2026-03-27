@@ -48,12 +48,23 @@ class BBCEWithLogitLoss(nn.Module):
 
         return loss
 
-def _iou_loss(pred, target):
-    pred = torch.sigmoid(pred)
-    inter = (pred * target).sum(dim=(2, 3))
-    union = (pred + target).sum(dim=(2, 3)) - inter
-    iou = 1 - (inter / union)
-
+def _iou_loss(pred, target, valid=None):
+    """Soft IOU loss. valid is an optional bool mask (B,H,W) of pixels to include."""
+    pred = torch.sigmoid(pred)  # (B, C, H, W)
+    # Build one-hot target: (B, C, H, W)
+    B, C, H, W = pred.shape
+    t = target.clone()
+    if valid is not None:
+        t[~valid] = 0   # treat ignored pixels as background for IOU
+    t_onehot = torch.zeros_like(pred)
+    t_onehot.scatter_(1, t.unsqueeze(1).clamp(0, C - 1), 1.0)
+    if valid is not None:
+        mask = valid.unsqueeze(1).float()
+        pred = pred * mask
+        t_onehot = t_onehot * mask
+    inter = (pred * t_onehot).sum(dim=(2, 3))
+    union = (pred + t_onehot).sum(dim=(2, 3)) - inter
+    iou = 1 - (inter / (union + 1e-6))
     return iou.mean()
 
 class PositionEmbeddingRandom(nn.Module):
@@ -214,7 +225,9 @@ class SAM(nn.Module):
             self.criterionBCE = BBCEWithLogitLoss()
 
         elif self.loss_mode == 'iou':
-            self.criterionBCE = torch.nn.CrossEntropyLoss()
+            # ignore_index=255 handles pixels masked by ignore_bg=true in the dataloader
+            # and also naturally handles class-imbalance by excluding background
+            self.criterionBCE = torch.nn.CrossEntropyLoss(ignore_index=255)
             self.criterionIOU = IOU()
 
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
@@ -441,13 +454,15 @@ class SAM(nn.Module):
         masks = F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
         return masks
     def backward_G(self):
-        """Calculate GAN and L1 loss for the generator"""
-        # print(self.pred_mask.shape)
-        # print(self.gt_mask.shape)
+        """Calculate cross-entropy + optional IOU loss, respecting ignore pixels."""
         self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
-        # if self.loss_mode == 'iou':
-        #     self.loss_G += _iou_loss(self.pred_mask, self.gt_mask)
-
+        if self.loss_mode == 'iou':
+            # Mask out ignore pixels (255) before computing IOU loss
+            valid = (self.gt_mask != 255)
+            if valid.any():
+                self.loss_G = self.loss_G + _iou_loss(
+                    self.pred_mask, self.gt_mask, valid
+                )
         self.loss_G.backward()
 
     def optimize_parameters(self):
