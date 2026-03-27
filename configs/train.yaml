@@ -24,17 +24,17 @@ classes:
   # - needles_syringes    # 11
   # - dead_animal         # 12
 
-ignore_bg: false
+ignore_bg: true
 
 # -----------------------------------------------------------------------------
 # Step 1 — Dataset preparation  (python train.py --prepare-only)
 # Remove or comment out this block once splits have been created.
 # -----------------------------------------------------------------------------
 split_preparation:
-  source_dir:    cdw_coco
+  source_dir:    data
 
   source_images_subdir:  images        # ← already correct
-  source_ann_file:  annotations.json  # ← point directly to this
+  source_ann_file:  data/annotations.json  # ← point directly to this
 
   train_ratio: 0.80
   val_ratio:   0.10
@@ -58,7 +58,7 @@ coco:
 # Input / augmentation
 # -----------------------------------------------------------------------------
 inp_size:   512
-augment:    false   # applied to train split only
+augment:    true   # applied to train split only
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -67,7 +67,7 @@ batch_size:  1
 num_workers: 0     # set 0 on Windows
 
 # Gradient accumulation  (effective batch = batch_size × accum_steps)
-accum_steps: 16
+accum_steps: 4
 grad_checkpoint: true
 
 # -----------------------------------------------------------------------------
@@ -97,7 +97,7 @@ model:
       backbone_channel_list: [1152, 576, 288, 144]
       fpn_top_down_levels: [2, 3]
       fpn_interp_model: nearest
-      img_size: 512
+      img_size: 256
       mlp_ratio: 4
       patch_size: 16
       qkv_bias: true
@@ -124,7 +124,7 @@ model:
 optimizer:
   name: adamw
   args:
-    lr: 0.0002
+    lr: 0.00005
     weight_decay: 0.01
 
 lr_min:        1.0e-7
@@ -136,9 +136,9 @@ use_amp: true
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
-epoch_max:  20
-epoch_val:  1      # validate every N epochs
-epoch_save: 2      # save 'last' checkpoint every N epochs
+epoch_max:  50
+epoch_val:  2      # validate every N epochs
+epoch_save: 10      # save 'last' checkpoint every N epochs
 
 early_stopping:
   patience:  10    # epochs without mIoU improvement; set null to disable
