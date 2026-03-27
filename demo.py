@@ -19,6 +19,7 @@ import threading
 # RAM monitoring utilities
 # ------------------------------
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 process = psutil.Process(os.getpid())
 
 def get_ram_mb():
@@ -105,8 +106,8 @@ PROHIBITED_NAMES = {"paint_can", "needles_syringes", "dead_animal"}
 IGNORED_CLASSES = {0}
 
 # ---- device ------------------------------------------------------------------
-DEVICE = torch.device("cpu")
-print(f"[demo_cpu] Running on device: {DEVICE}")
+# DEVICE = torch.device("cpu")
+print(f"[demo_cpu] Running on device: {device}")
 
 # ---- config / model helpers --------------------------------------------------
 
@@ -139,7 +140,7 @@ def load_weights(model, ckpt_path):
     #     quant.prepare(model, inplace=True)
     #     quant.convert(model, inplace=True)
 
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location=device)
 
     if isinstance(state, dict):
         for key in ("model", "state_dict", "net", "model_state_dict"):
@@ -191,14 +192,14 @@ def preprocess(img_path, size, prescale):
     if prescale > 0 and max(img.width, img.height) > prescale:
         img.thumbnail((prescale, prescale), Image.LANCZOS)
         print(f"[demo_cpu] Prescaled to  : W={img.width}  H={img.height}")
-    tensor = get_transform(size)(img).unsqueeze(0).to(DEVICE)
+    tensor = get_transform(size)(img).unsqueeze(0).to(device)
     return tensor, img.copy()
 
 # ---- model dispatch ----------------------------------------------------------
 
 def run_model(model, tensor):
     dummy_gt = torch.zeros(
-        tensor.shape[0], 1, tensor.shape[2], tensor.shape[3], device=DEVICE
+        tensor.shape[0], 1, tensor.shape[2], tensor.shape[3], device=device
     )
     if hasattr(model, "set_input") and hasattr(model, "infer"):
         model.set_input(tensor, dummy_gt)
@@ -519,7 +520,7 @@ def infer_single(model, img_path, out_dir, size, prescale,
     monitor.start()
                 
     model.eval()
-    model.to(DEVICE)
+    model.to(device)
 
     tensor, orig = preprocess(img_path, size, prescale)
 
@@ -574,7 +575,7 @@ def infer_single(model, img_path, out_dir, size, prescale,
 def infer_dataset(model, cfg, out_dir, size,
                   epsilon_factor=0.002, min_area_ratio=0.0001):
     model.eval()
-    model.to(DEVICE)
+    model.to(device)
 
     try:
         from datasets import make as make_dataset
@@ -592,7 +593,7 @@ def infer_dataset(model, cfg, out_dir, size,
     total_iou, n = 0.0, 0
 
     for i, batch in enumerate(loader):
-        inp = batch["inp"].to(DEVICE)
+        inp = batch["inp"].to(device)
         gt  = batch.get("gt", None)
 
         t0  = time.time()
@@ -655,7 +656,7 @@ def parse_args():
                    help="Path to trained .pth checkpoint")
 
     grp = p.add_mutually_exclusive_group()
-    grp.add_argument("--img",     default="/content/cdw_coco/images/0b0a9780-b3b9-11f0-8523-a2385bb6bc5a_7602761_original_20251028044606-1_3_pickup_reported_1_jpg.rf.4ddb920d14254e77e00daaf38dd4428a.jpg",
+    grp.add_argument("--img",     default="/content/data/images/38f00356-be9a-11f0-b3f7-8a35effc9918_7647831_original_2025111101031_4aa553c4.jpg",
                      help="Single image path")
     grp.add_argument("--folder",  default=None,
                      help="Folder of images (jpg/png/jpeg); runs all inside it")
