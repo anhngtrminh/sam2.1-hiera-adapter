@@ -152,23 +152,11 @@ class SAM(nn.Module):
             ),
             img_size=em.get('img_size', 1024),
         )
-        # _bb_feat_sizes: actual spatial sizes of the FPN levels after scalp=1.
-        # Hiera uses patch_embed with stride=4, then 3 pooling stages (stride=2 each).
-        # Spatial sizes: inp//4, inp//8, inp//16, inp//32 (4 levels coarse->fine reversed)
-        # After scalp=1 removes the coarsest, 3 levels remain.
-        # These sizes are independent of img_size (which is only used for pos embeddings).
-        _inp  = inp_size  # actual tensor size fed to the encoder
-        _s0   = _inp // 4   # finest: patch_embed stride=4, no pool
-        _s1   = _inp // 8   # 1 pool
-        _s2   = _inp // 16  # 2 pools  (image_embed — finest after scalp removes //32)
-        self._bb_feat_sizes = [
-            (_s0, _s0),
-            (_s1, _s1),
-            (_s2, _s2),
-        ]
-        # image_embedding_size: spatial size of image_embed = feats[-1] = finest level
-        # = inp_size // 16 (2 pooling stages after patch_embed stride-4)
-        # image_embed channel dim = d_model = 256 (FPN neck projects all levels to this)
+        # _bb_feat_sizes and image_embedding_size are computed dynamically
+        # at runtime from the actual input tensor (see _compute_feat_sizes).
+        # Initialise with inp_size as a sensible default; overwritten each forward pass.
+        self._bb_feat_sizes = [(inp_size//4,)*2, (inp_size//8,)*2, (inp_size//16,)*2]
+        self.image_embedding_size = inp_size // 16
         self.prompt_embed_dim = encoder_mode['prompt_embed_dim']
         self.sam_mask_decoder_extra_args = sam_mask_decoder_extra_args
         self.use_high_res_features_in_sam = use_high_res_features_in_sam
@@ -232,10 +220,18 @@ class SAM(nn.Module):
 
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
-        # image_embedding_size = spatial size of image_embed (feats[-1])
-        # = inp_size // 16 (patch_embed stride-4, then 2 pooling stages)
-        self.image_embedding_size = inp_size // 16
         self.no_mask_embed = nn.Embedding(1, encoder_mode['prompt_embed_dim'])
+
+    def _compute_feat_sizes(self, inp: torch.Tensor):
+        """Compute FPN spatial sizes and image_embedding_size from actual input shape.
+        Called at the start of forward() and infer() so any input resolution works.
+        Hiera: patch_embed stride=4, then 3x stride-2 pool -> levels at //4,//8,//16,//32.
+        scalp=1 removes the coarsest (//32), leaving 3 levels: //4, //8, //16.
+        """
+        h = inp.shape[-2]
+        s0, s1, s2 = h // 4, h // 8, h // 16
+        self._bb_feat_sizes      = [(s0, s0), (s1, s1), (s2, s2)]
+        self.image_embedding_size = s2
 
     def set_input(self, input, gt_mask):
         self.input = input.to(self.device)
@@ -255,6 +251,7 @@ class SAM(nn.Module):
 
     def forward(self):
         bs = 1
+        self._compute_feat_sizes(self.input)  # update sizes for actual input resolution
 
         # Embed prompts
         sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
@@ -335,7 +332,8 @@ class SAM(nn.Module):
         self.pred_mask = masks
 
     def infer(self, input):
-        bs = 1
+        bs = input.shape[0]
+        self._compute_feat_sizes(input)  # update sizes for actual input resolution
 
         # Embed prompts
         sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=input.device)
@@ -370,7 +368,7 @@ class SAM(nn.Module):
         if self.directly_add_no_mem_embed:
             vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to(vision_feats[-1].device))
         feats = [
-            feat.permute(1, 2, 0).view(bs, -1, *feat_size)
+            feat.permute(1, 2, 0).reshape(bs, -1, *feat_size)
             for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
         ][::-1]
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}

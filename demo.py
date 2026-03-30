@@ -60,37 +60,37 @@ class RAMMonitor:
 # if it ever appears (e.g. after fine-tuning on a labelled prohibited-item set).
 CLASS_NAMES = [
     "background",           # 0  - never drawn
-    "bin",                  # 1
-    "concrete_bricks_tiles",# 2
-    "soils",                # 3
+    # "bin",                  # 1
+    # "concrete_bricks_tiles",# 2
+    # "soils",                # 3
     "green_waste_timber",   # 4
-    "plastic",              # 5
-    "plastic",              # 6
-    "metals_e_waste",       # 7
-    "non_recyclable_waste", # 8
-    "cardboard",            # 9
-    "plaster_board",        # 10
-    "paint_can",            # 11  <- fine-tune target
-    "needles_syringes",     # 12 <- fine-tune target
-    "dead_animal",          # 13 <- fine-tune target
+    # "plastic",              # 5
+    # "plastic",              # 6
+    # "metals_e_waste",       # 7
+    # "non_recyclable_waste", # 8
+    # "cardboard",            # 9
+    # "plaster_board",        # 10
+    # "paint_can",            # 11  <- fine-tune target
+    # "needles_syringes",     # 12 <- fine-tune target
+    # "dead_animal",          # 13 <- fine-tune target
 ]
 
 # RGBA fill used for the semi-transparent mask overlay
 CLASS_COLORS_RGBA = [
     (  0,   0,   0,   0),   #  0 background    - fully transparent
-    (255, 215,   0, 120),   #  1 bin
-    (220,  20,  60, 120),   #  2 concrete
-    ( 64,  64,  64, 120),   #  3 soils
+    # (255, 215,   0, 120),   #  1 bin
+    # (220,  20,  60, 120),   #  2 concrete
+    # ( 64,  64,  64, 120),   #  3 soils
     ( 34, 139,  34, 120),   #  4 timber
-    (255, 140,   0, 120),   #  5 plastic (hard)
-    (255, 140,   0, 120),   #  6 plastic (soft)
-    ( 70, 130, 180, 120),   #  7 metals/e-waste
-    (255,  20, 147, 120),   #  8 non-recyclable
-    (210, 180, 140, 120),   #  9 cardboard
-    (186,  85, 211, 120),   # 10 plaster board
-    (255,   0,   0, 180),   # 11 paint_can - vivid red, more opaque
-    (255,   0,   0, 180),   # 12 needles_syringes - vivid red, more opaque
-    (255,   0,   0, 180),   # 13 dead_animal - vivid red, more opaque
+    # (255, 140,   0, 120),   #  5 plastic (hard)
+    # (255, 140,   0, 120),   #  6 plastic (soft)
+    # ( 70, 130, 180, 120),   #  7 metals/e-waste
+    # (255,  20, 147, 120),   #  8 non-recyclable
+    # (210, 180, 140, 120),   #  9 cardboard
+    # (186,  85, 211, 120),   # 10 plaster board
+    # (255,   0,   0, 180),   # 11 paint_can - vivid red, more opaque
+    # (255,   0,   0, 180),   # 12 needles_syringes - vivid red, more opaque
+    # (255,   0,   0, 180),   # 13 dead_animal - vivid red, more opaque
 ]
 
 # Solid RGB for bbox borders and label chips
@@ -116,8 +116,15 @@ def load_config(cfg_path):
         return yaml.safe_load(f)
 
 
-def build_model(cfg):
-    """Build the SAM wrapper exactly as train.py / test.py do."""
+def build_model(cfg, ckpt_path=None):
+    """Build the SAM wrapper exactly as train.py / test.py do.
+
+    num_classes is injected in two ways (first wins):
+      1. From the checkpoint weights — reads cls_upscaling.3.weight shape so the
+         model architecture always matches the saved file, regardless of config.
+      2. From cfg["classes"] list (config YAML) — len(classes) - 1 foreground + bg.
+      3. Fallback to cfg["model"]["args"]["num_classes"] if explicitly set.
+    """
     try:
         from models import make as make_model
     except ImportError:
@@ -125,6 +132,44 @@ def build_model(cfg):
             "Cannot import 'models'. "
             "Run this script from inside the SAM2-Adapter-CDW repo root."
         )
+
+    # ── Infer num_classes ────────────────────────────────────────────────────
+    num_classes = None
+
+    # Priority 1: read directly from checkpoint weight shape
+    if ckpt_path and os.path.isfile(ckpt_path):
+        try:
+            import torch as _torch
+            _sd  = _torch.load(ckpt_path, map_location="cpu")
+            if isinstance(_sd, dict):
+                for _k in ("model", "state_dict", "net", "model_state_dict"):
+                    if _k in _sd:
+                        _sd = _sd[_k]
+                        break
+            _key = "mask_decoder.cls_upscaling.3.weight"
+            if _key in _sd:
+                # output channels = 32 * num_classes  (transformer_dim*num_classes//8, 64//8=32*nc)
+                num_classes = _sd[_key].shape[0] // 32
+                print(f"[demo] num_classes={num_classes} detected from checkpoint.")
+        except Exception as _e:
+            print(f"[demo] Could not read num_classes from checkpoint: {_e}")
+
+    # Priority 2: count from config classes list
+    if num_classes is None and cfg.get("classes"):
+        num_classes = len(cfg["classes"])   # includes background at index 0
+        print(f"[demo] num_classes={num_classes} inferred from config classes list.")
+
+    # Priority 3: already set in model args
+    if num_classes is None:
+        num_classes = cfg.get("model", {}).get("args", {}).get("num_classes")
+
+    if num_classes is None:
+        raise ValueError(
+            "Cannot determine num_classes. Pass --model <ckpt> so it can be "
+            "read from the checkpoint, or set 'classes' in your config YAML."
+        )
+
+    cfg.setdefault("model", {}).setdefault("args", {})["num_classes"] = num_classes
     return make_model(cfg["model"])
 
 
@@ -650,13 +695,13 @@ def infer_dataset(model, cfg, out_dir, size,
 
 def parse_args():
     p = argparse.ArgumentParser(description="CPU demo for SAM2-Adapter-CDW")
-    p.add_argument("--config",  default="configs/demo.yaml",
+    p.add_argument("--config",  default="configs/train.yaml",
                    help="Path to YAML config file")
-    p.add_argument("--model",   default="/content/save/_train/model_epoch_best.pth",
+    p.add_argument("--model",   default="C:/Users/ntmanh1/Documents/project/handel group/segmentation/28573229/SAM2-Adapter-CDW/streamlit/checkpoints/model_epoch_best.pth",
                    help="Path to trained .pth checkpoint")
 
     grp = p.add_mutually_exclusive_group()
-    grp.add_argument("--img",     default="/content/data/images/38f00356-be9a-11f0-b3f7-8a35effc9918_7647831_original_2025111101031_4aa553c4.jpg",
+    grp.add_argument("--img",     default="C:/Users/ntmanh1/Downloads/image (1).png",
                      help="Single image path")
     grp.add_argument("--folder",  default=None,
                      help="Folder of images (jpg/png/jpeg); runs all inside it")
@@ -691,7 +736,7 @@ def collect_images(folder):
 def main():
     args  = parse_args()
     cfg   = load_config(args.config)
-    model = build_model(cfg)
+    model = build_model(cfg, ckpt_path=args.model)
     model = load_weights(model, args.model)
 
     kw = dict(epsilon_factor=args.epsilon, min_area_ratio=args.min_area)
