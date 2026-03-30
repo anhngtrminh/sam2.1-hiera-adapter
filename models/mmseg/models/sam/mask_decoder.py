@@ -240,7 +240,7 @@ class MaskDecoder(nn.Module):
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
 
         # Upscale mask embeddings and predict masks using the mask tokens
-        src = src.transpose(1, 2).view(b, c, h, w)
+        src = src.transpose(1, 2).reshape(b, c, h, w)
         if not self.use_high_res_features:
             upscaled_embedding = self.output_upscaling(src)
             # upscaled_embedding_feat = self.output_upscaling(src_feature)
@@ -266,7 +266,7 @@ class MaskDecoder(nn.Module):
 
         cls_upscaled_embedding = self.cls_upscaling(upscaled_embedding_concat)
 
-        masks = (hyper_in @ cls_upscaled_embedding.view(b, c,self.num_classes*h * w)).view(b, self.num_mask_tokens, -1, h, w) #(1,4,256,256)
+        masks = (hyper_in @ cls_upscaled_embedding.reshape(b, c, self.num_classes*h * w)).reshape(b, self.num_mask_tokens, -1, h, w)
 
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
