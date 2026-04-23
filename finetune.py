@@ -214,6 +214,8 @@ def _load_source_annotations(src: str, sp: dict, src_img_dir: str,
             data['annotations'] = [a for a in data['annotations'] if a['image_id'] in id_set]
             print(f'[prepare]  Found {len(data["images"])} images, '
                   f'{len(data["annotations"])} annotations in combined JSON.')
+            # ── Filter to chosen categories (if any) ──────────────────────────
+            data = _filter_coco_to_categories(data, _chosen_categories(cfg))
             return data
 
     # ── Option B: single JSON in annotations/ that is not per-image ──────────
@@ -233,6 +235,8 @@ def _load_source_annotations(src: str, sp: dict, src_img_dir: str,
                 data['annotations'] = [a for a in data['annotations'] if a['image_id'] in id_set]
                 print(f'[prepare]  Found {len(data["images"])} images, '
                       f'{len(data["annotations"])} annotations.')
+                # ── Filter to chosen categories (if any) ──────────────────────
+                data = _filter_coco_to_categories(data, _chosen_categories(cfg))
                 return data
 
     # ── Option C: per-image JSON files in annotations/ ────────────────────────
@@ -242,7 +246,8 @@ def _load_source_annotations(src: str, sp: dict, src_img_dir: str,
         img_stems  = {os.path.splitext(f)[0] for f in all_imgs}
         if json_stems & img_stems:   # at least some overlap → per-image format
             print(f'[prepare] Merging per-image JSONs from: {ann_subdir}')
-            return _merge_per_image_jsons(ann_subdir, src_img_dir, all_imgs, cfg)
+            merged = _merge_per_image_jsons(ann_subdir, src_img_dir, all_imgs, cfg)
+            return _filter_coco_to_categories(merged, _chosen_categories(cfg))
 
     # ── Option D: images only — empty annotations ─────────────────────────────
     print('[prepare] WARNING: no annotations found — building image-only skeleton.')
@@ -305,6 +310,63 @@ def _categories_from_cfg(cfg: dict) -> list:
     ]
 
 
+def _chosen_categories(cfg: dict) -> list | None:
+    """
+    Return the list of chosen category names from config, or None if all
+    categories should be used.
+
+    Config key (in YAML):
+        chosen_categories: [bin, glass, metal]   # names from the JSON
+        # or leave unset / null to use all categories
+    """
+    chosen = cfg.get('chosen_categories')
+    if not chosen:
+        return None
+    return [str(c) for c in chosen]
+
+
+def _filter_coco_to_categories(data: dict, chosen_names: list | None) -> dict:
+    """
+    Keep only the annotations and images that belong to *chosen_names*.
+
+    - Removes categories not in chosen_names.
+    - Removes annotations whose category is not in chosen_names.
+    - Removes images that have *no* remaining annotation.
+
+    If chosen_names is None, returns data unchanged.
+    """
+    if not chosen_names:
+        return data
+
+    chosen_set = set(chosen_names)
+    kept_cats  = [c for c in data['categories'] if c['name'] in chosen_set]
+    if not kept_cats:
+        raise ValueError(
+            f'None of the chosen_categories {chosen_names} were found in the '
+            f'annotation file.  Available: '
+            f'{[c["name"] for c in data["categories"]]}'
+        )
+
+    kept_cat_ids = {c['id'] for c in kept_cats}
+    kept_anns    = [a for a in data['annotations']
+                    if a['category_id'] in kept_cat_ids]
+    kept_img_ids = {a['image_id'] for a in kept_anns}
+    kept_imgs    = [im for im in data['images'] if im['id'] in kept_img_ids]
+
+    print(f'[filter] chosen_categories={chosen_names}')
+    print(f'[filter]  kept {len(kept_cats)} categories, '
+          f'{len(kept_imgs)} images, {len(kept_anns)} annotations '
+          f'(dropped {len(data["images"]) - len(kept_imgs)} images with no '
+          f'matching annotations).')
+
+    return {
+        **data,
+        'categories':  kept_cats,
+        'images':      kept_imgs,
+        'annotations': kept_anns,
+    }
+
+
 # =============================================================================
 # Step 2 — COCO Semantic Segmentation Dataset
 # =============================================================================
@@ -334,6 +396,7 @@ class COCOSegDataset(Dataset):
         inp_size:  int  = 1024,
         augment:   bool = False,
         ignore_bg: bool = False,
+        chosen_categories: list = None,   # e.g. ['bin', 'glass'] or None for all
         **_,                      # absorbs unused kwargs (classes, etc.)
     ):
         try:
@@ -355,6 +418,29 @@ class COCOSegDataset(Dataset):
 
         self.coco    = COCO(ann_path)
         self.img_dir = os.path.join(coco_root, 'images', split)
+
+        # ── Optionally restrict to a subset of categories ─────────────────────
+        # If chosen_categories is given, remove all other cats from the COCO
+        # object so that downstream annotation loading ignores them.
+        if chosen_categories:
+            chosen_set  = set(chosen_categories)
+            all_cats    = self.coco.loadCats(self.coco.getCatIds())
+            drop_ids    = {c['id'] for c in all_cats if c['name'] not in chosen_set}
+            keep_ids    = {c['id'] for c in all_cats if c['name'] in chosen_set}
+            if not keep_ids:
+                raise ValueError(
+                    f'[{split}] None of chosen_categories={chosen_categories} '
+                    f'matched JSON cats: {[c["name"] for c in all_cats]}'
+                )
+            # Patch the in-memory COCO dataset to drop unwanted categories
+            self.coco.dataset['categories'] = [
+                c for c in self.coco.dataset['categories'] if c['id'] in keep_ids
+            ]
+            self.coco.dataset['annotations'] = [
+                a for a in self.coco.dataset['annotations']
+                if a['category_id'] in keep_ids
+            ]
+            self.coco.createIndex()   # rebuild internal indices
 
         # ── Build category_id -> contiguous class index from the JSON itself ──
         # JSON categories sorted by their own id field (ascending).
@@ -383,7 +469,10 @@ class COCOSegDataset(Dataset):
         ann_img_ids   = {a['image_id'] for a in self.coco.dataset.get('annotations', [])}
         self.img_ids  = sorted(ann_img_ids & set(self.coco.getImgIds()))
         if not self.img_ids:
-            raise RuntimeError(f'No annotated images in {ann_path}')
+            raise RuntimeError(
+                f'No annotated images in {ann_path} '
+                f'(after chosen_categories filter={chosen_categories})'
+            )
 
         self.img_tf = T.Compose([
             T.Resize((inp_size, inp_size), interpolation=T.InterpolationMode.BILINEAR),
@@ -482,6 +571,7 @@ def make_data_loaders(distributed: bool):
         coco_root=cc['coco_root'],
         ignore_bg=config.get('ignore_bg', False),
         inp_size=config.get('inp_size', 1024),
+        chosen_categories=config.get('chosen_categories') or None,
     )
 
     train_ds = COCOSegDataset(split='train', augment=config.get('augment', True), **common)
@@ -790,7 +880,6 @@ def main(config_: dict, save_path: str):
     if distributed:
         dist.destroy_process_group()
 
-
 # =============================================================================
 # Entry point
 # =============================================================================
@@ -804,10 +893,22 @@ if __name__ == '__main__':
                         help='Restructure dataset then exit (no training).')
     parser.add_argument('--force-prepare', action='store_true',
                         help='Force re-run of dataset preparation.')
+    parser.add_argument(
+        '--categories', nargs='+', default=None, metavar='CAT',
+        help=(
+            'Space-separated list of category names to train on. '
+            'Overrides chosen_categories in the YAML config. '
+            'Example: --categories bin glass metal'
+        ),
+    )
     args = parser.parse_args()
 
     with open(args.config, 'r', encoding='utf-8') as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
+
+    # CLI --categories overrides YAML chosen_categories
+    if args.categories:
+        cfg['chosen_categories'] = args.categories
 
     config = cfg   # needed by _categories_from_cfg() during preparation
 
