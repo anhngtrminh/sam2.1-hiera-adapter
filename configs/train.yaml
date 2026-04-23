@@ -4,7 +4,6 @@
 # Single source of truth: edit `classes` here only.
 # num_classes in model.args is set automatically by train.py.
 # =============================================================================
-
 # -----------------------------------------------------------------------------
 # Class definitions  (order = contiguous index; index 0 = background)
 # -----------------------------------------------------------------------------
@@ -23,9 +22,7 @@ classes:
   # - paint_can           # 10  
   # - needles_syringes    # 11
   # - dead_animal         # 12
-
 ignore_bg: false
-
 # -----------------------------------------------------------------------------
 # Step 1 — Dataset preparation  (python train.py --prepare-only)
 # Remove or comment out this block once splits have been created.
@@ -33,15 +30,12 @@ ignore_bg: false
 split_preparation:
   source_dir:    data
   coco_root:     cdw_coco   # splits will be written here
-
-  source_images_subdir:  images        # ← already correct
+  source_images_subdir:  train        # ← already correct
   source_ann_file:  data/annotations.json  # ← point directly to this
-
-  train_ratio: 0.80
-  val_ratio:   0.10
-  test_ratio:  0.10
+  train_ratio: 0.85
+  val_ratio:   0.15
+  test_ratio:  0
   split_seed:  42
-
 # The split output goes to coco_root defined in split_preparation (or the coco block below)
 # -----------------------------------------------------------------------------
 # COCO dataset root  (produced by Step 1)
@@ -52,28 +46,23 @@ coco:
   # Override per split if needed:
   # train_ann_file: annotations/instances_train.json
   # val_ann_file:   annotations/instances_val.json
-
 # -----------------------------------------------------------------------------
 # Input / augmentation
 # -----------------------------------------------------------------------------
 inp_size:   512
 augment:    true   # applied to train split only
-
 # -----------------------------------------------------------------------------
 # DataLoader
 # -----------------------------------------------------------------------------
 batch_size:  1
 num_workers: 0     # set 0 on Windows
-
 # Gradient accumulation  (effective batch = batch_size × accum_steps)
 accum_steps: 4
 grad_checkpoint: true
-
 # -----------------------------------------------------------------------------
 # Model
 # -----------------------------------------------------------------------------
 sam_checkpoint: pretrained/sam2.1_hiera_large.pt # 1_hiera_large.pt  # 1_hiera_base_plus.pt
-
 # SAM2.1_hiera_large.pt parameters
 model:
   name: sam
@@ -115,7 +104,6 @@ model:
       depth: 32
       num_heads: 2
       global_attn_indexes: [7, 15, 23, 31]
-
 # -----------------------------------------------------------------------------
 # Optimisation
 # -----------------------------------------------------------------------------
@@ -123,34 +111,32 @@ optimizer:
   name: adamw
   args:
     lr: 0.0002
-    weight_decay: 0.01
-
-lr_min:        1.0e-7
+    weight_decay: 0.05
+# Add LR scheduler warmup
+lr_scheduler:
+  name: cosine
+  warmup_epochs: 3
+  warmup_lr: 1.0e-6
+lr_min: 1.0e-6        # lower floor
 freeze_encoder: true    # freeze SAM image encoder; only adapters are trained
-
 # Mixed precision  (set false on CPU)
 use_amp: true
-
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
-epoch_max:  50
+epoch_max:  100
 epoch_val:  1      # validate every N epochs
-epoch_save: 10      # save 'last' checkpoint every N epochs
-
+epoch_save: 30      # save 'last' checkpoint every N epochs
 early_stopping:
-  patience:  10    # epochs without mIoU improvement; set null to disable
-  min_delta: 0.001
-
+  patience:  20    # epochs without mIoU improvement; set null to disable
+  min_delta: 0.005
 # Resume training from a checkpoint:
 # resume:      save/my_run/model_epoch_last.pth
 # start_epoch: 61
-
 # -----------------------------------------------------------------------------
 # Evaluation
 # -----------------------------------------------------------------------------
 eval_type: seg
-
 data_norm:
   inp:
     sub: [0.5]
