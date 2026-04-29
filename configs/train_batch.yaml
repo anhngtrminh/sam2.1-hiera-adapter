@@ -54,10 +54,10 @@ augment:    true   # applied to train split only
 # -----------------------------------------------------------------------------
 # DataLoader
 # -----------------------------------------------------------------------------
-batch_size:  4
-num_workers: 0     # set 0 on Windows
+batch_size:  2
+num_workers: 2     # set 0 on Windows
 # Gradient accumulation  (effective batch = batch_size × accum_steps)
-accum_steps: 4
+accum_steps: 2
 grad_checkpoint: true
 
 # -----------------------------------------------------------------------------

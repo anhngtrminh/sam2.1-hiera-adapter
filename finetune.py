@@ -625,9 +625,14 @@ def prepare_training(device):
 
     # Freeze image encoder; adapters + prompt generator stay trainable
     if config.get('freeze_encoder', True):
+        # for name, param in model.named_parameters():
+        #     if 'image_encoder' in name and 'prompt_generator' not in name:
+        #         param.requires_grad_(False)
         for name, param in model.named_parameters():
-            if 'image_encoder' in name and 'prompt_generator' not in name:
-                param.requires_grad_(False)
+            if 'image_encoder' in name:
+                # Freeze trunk (Hiera) but keep neck trainable
+                if 'trunk' in name and 'prompt_generator' not in name:
+                    param.requires_grad_(False)
 
     if is_main:
         total = sum(p.numel() for p in model.parameters())
