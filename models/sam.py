@@ -158,6 +158,7 @@ class SAM(nn.Module):
         self._bb_feat_sizes = [(inp_size//4,)*2, (inp_size//8,)*2, (inp_size//16,)*2]
         self.image_embedding_size = inp_size // 16
         self.prompt_embed_dim = encoder_mode['prompt_embed_dim']
+        self.class_prompt_embed = nn.Embedding(num_classes - 1, self.prompt_embed_dim)
         self.sam_mask_decoder_extra_args = sam_mask_decoder_extra_args
         self.use_high_res_features_in_sam = use_high_res_features_in_sam
         self.directly_add_no_mem_embed = directly_add_no_mem_embed
@@ -254,7 +255,9 @@ class SAM(nn.Module):
         self._compute_feat_sizes(self.input)  # update sizes for actual input resolution
 
         # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
+        # sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
+        cls_tokens = self.class_prompt_embed.weight.unsqueeze(0).expand(bs, -1, -1)
+        sparse_embeddings = cls_tokens  # shape: (bs, num_classes-1, prompt_embed_dim)
         dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
             bs, -1, self.image_embedding_size, self.image_embedding_size
         )
