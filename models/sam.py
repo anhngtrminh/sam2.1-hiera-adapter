@@ -250,7 +250,7 @@ class SAM(nn.Module):
 
 
     def forward(self):
-        bs = 1
+        bs = self.input.shape[0]  # real batch size, not hardcoded 1
         self._compute_feat_sizes(self.input)  # update sizes for actual input resolution
 
         # Embed prompts
@@ -291,22 +291,15 @@ class SAM(nn.Module):
             
     
 
+        # Use actual spatial sizes from encoder output, not stored _bb_feat_sizes,
+        # so any batch size and input resolution work correctly.
         feats = [
-            feat.permute(1, 2, 0).reshape(1, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
+            feat.permute(1, 2, 0).reshape(bs, -1, *feat_size)
+            for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
         ][::-1]
 
-        # print('.........')
-
-        # for i in range(len(feats)):
-        #     print(feats[i].shape)
-
-     
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = [
-            feat_level[-1].unsqueeze(0)
-            for feat_level in self._features["high_res_feats"]
-        ]
+        high_res_features = self._features["high_res_feats"]  # list of (bs, C, H, W)
         # Predict masks
         low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
             image_embeddings=self._features["image_embed"],
@@ -367,15 +360,14 @@ class SAM(nn.Module):
 
         if self.directly_add_no_mem_embed:
             vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to(vision_feats[-1].device))
+        # Use actual spatial sizes from encoder output, not stored _bb_feat_sizes,
+        # so any batch size and input resolution work correctly.
         feats = [
             feat.permute(1, 2, 0).reshape(bs, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
+            for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
         ][::-1]
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = [
-            feat_level[-1].unsqueeze(0)
-            for feat_level in self._features["high_res_feats"]
-        ]
+        high_res_features = self._features["high_res_feats"]  # list of (bs, C, H, W)
 
         # Predict masks
         low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
