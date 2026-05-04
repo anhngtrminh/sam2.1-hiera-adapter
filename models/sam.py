@@ -25,7 +25,6 @@ def init_weights(layer):
         nn.init.normal_(layer.weight, mean=0.0, std=0.02)
         nn.init.constant_(layer.bias, 0.0)
     elif type(layer) == nn.BatchNorm2d:
-        # print(layer)
         nn.init.normal_(layer.weight, mean=1.0, std=0.02)
         nn.init.constant_(layer.bias, 0.0)
 
@@ -83,11 +82,9 @@ class PositionEmbeddingRandom(nn.Module):
 
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
         """Positionally encode points that are normalized to [0,1]."""
-        # assuming coords are in [0, 1]^2 square and have d_1 x ... x d_n x 2 shape
         coords = 2 * coords - 1
         coords = coords @ self.positional_encoding_gaussian_matrix
         coords = 2 * np.pi * coords
-        # outputs d_1 x ... x d_n x C shape
         return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
 
     def forward(self, size: int) -> torch.Tensor:
@@ -204,8 +201,6 @@ class SAM(nn.Module):
                 if "prompt" not in k and "mask_decoder" not in k and "prompt_encoder" not in k:
                     p.requires_grad = False
 
-
-
         self.loss_mode = loss
         if self.loss_mode == 'bce':
             self.criterionBCE = torch.nn.BCEWithLogitsLoss()
@@ -222,6 +217,13 @@ class SAM(nn.Module):
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
         self.no_mask_embed = nn.Embedding(1, encoder_mode['prompt_embed_dim'])
+
+        # FIX 1: Register no_mem_embed as a proper trainable parameter instead of
+        # creating a throwaway nn.Parameter inside forward() on every step.
+        # Previously this was `torch.nn.Parameter(torch.zeros(...))` inside forward/infer,
+        # which is NOT registered in the module and therefore never trained.
+        if self.directly_add_no_mem_embed:
+            self.no_mem_embed = nn.Parameter(torch.zeros(1, 1, 256))
 
     def _compute_feat_sizes(self, inp: torch.Tensor):
         """Compute FPN spatial sizes and image_embedding_size from actual input shape.
@@ -249,174 +251,152 @@ class SAM(nn.Module):
         """
         return self.pe_layer(self.image_embedding_size).unsqueeze(0)
 
-
-    def forward(self):
-        bs = self.input.shape[0]  # real batch size, not hardcoded 1
-        self._compute_feat_sizes(self.input)  # update sizes for actual input resolution
-
-        # Embed prompts
-        # sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
-        cls_tokens = self.class_prompt_embed.weight.unsqueeze(0).expand(bs, -1, -1)
-        sparse_embeddings = cls_tokens  # shape: (bs, num_classes-1, prompt_embed_dim)
-        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
-            bs, -1, self.image_embedding_size, self.image_embedding_size
-        )
-
-        self.features = self.image_encoder(self.input)
+    def _encode_image(self, input: torch.Tensor):
+        """Shared image encoding logic used by both forward() and infer()."""
+        features = self.image_encoder(input)
         if self.use_high_res_features_in_sam:
-            # precompute projected level 0 and level 1 features in SAM decoder
-            # to avoid running it again on every SAM click
-            self.features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
-                self.features["backbone_fpn"][0]
+            features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
+                features["backbone_fpn"][0]
             )
-            self.features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
-                self.features["backbone_fpn"][1]
+            features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
+                features["backbone_fpn"][1]
             )
-        self.features = self.features.copy()
-        assert len(self.features["backbone_fpn"]) == len(self.features["vision_pos_enc"])
-        assert len(self.features["backbone_fpn"]) >= self.num_feature_levels
+        features = features.copy()
+        assert len(features["backbone_fpn"]) == len(features["vision_pos_enc"])
+        assert len(features["backbone_fpn"]) >= self.num_feature_levels
 
-        feature_maps = self.features["backbone_fpn"][-self.num_feature_levels :]
-        vision_pos_embeds = self.features["vision_pos_enc"][-self.num_feature_levels :]
+        feature_maps      = features["backbone_fpn"][-self.num_feature_levels:]
+        vision_pos_embeds = features["vision_pos_enc"][-self.num_feature_levels:]
 
-        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
-        # flatten NxCxHxW to HWxNxC
-        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
+        feat_sizes        = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
+        vision_feats      = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
         vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
 
-        _, vision_feats, _, _ = self.features, vision_feats, vision_pos_embeds, feat_sizes
-
+        # FIX 2: Use the registered self.no_mem_embed parameter instead of creating
+        # a new unregistered nn.Parameter on every call (which was never trained).
         if self.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to('cuda' if torch.cuda.is_available() else 'cpu'))
+            vision_feats[-1] = vision_feats[-1] + self.no_mem_embed.to(vision_feats[-1].device)
 
-        # for i in range(len(vision_feats)):
-        #     print(vision_feats[i].shape)
-            
-    
-
-        # Use actual spatial sizes from encoder output, not stored _bb_feat_sizes,
-        # so any batch size and input resolution work correctly.
+        bs = input.shape[0]
         feats = [
             feat.permute(1, 2, 0).reshape(bs, -1, *feat_size)
             for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
         ][::-1]
 
-        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = self._features["high_res_feats"]  # list of (bs, C, H, W)
-        # Predict masks
-        low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
+        return {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
+
+    def forward(self):
+        bs = self.input.shape[0]
+        self._compute_feat_sizes(self.input)
+
+        # Class-conditioned sparse embeddings: one learnable token per foreground class.
+        # These are the prompts that teach the decoder to separate categories.
+        cls_tokens = self.class_prompt_embed.weight.unsqueeze(0).expand(bs, -1, -1)
+        sparse_embeddings = cls_tokens  # (bs, num_classes-1, prompt_embed_dim)
+
+        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
+            bs, -1, self.image_embedding_size, self.image_embedding_size
+        )
+
+        self._features = self._encode_image(self.input)
+        high_res_features = self._features["high_res_feats"]
+
+        # FIX 3: Use multimask_output=True in forward() to match infer().
+        # With multimask_output=False the decoder collapses to 1 output channel,
+        # which is then squeeze(dim=1)-d away in postprocess_masks — the model
+        # never produces one logit map per class, so cross-class competition is broken.
+        low_res_masks, iou_predictions, sam_output_tokens, object_score_logits = self.mask_decoder(
             image_embeddings=self._features["image_embed"],
             image_pe=self.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False,
-            repeat_image=False,  # the image is already batched
+            multimask_output=True,   # <-- was False; must match infer()
+            repeat_image=False,
             high_res_features=high_res_features,
         )
 
-        # Upscale the masks to the original image resolution
+        # Debug: fires only on the first forward pass so you can verify decoder output shape.
+        if not getattr(self, '_shape_printed', False):
+            print(f'[SAM] decoder low_res_masks raw shape : {tuple(low_res_masks.shape)}')
+            masks_dbg = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
+            print(f'[SAM] pred_mask shape after postprocess: {tuple(masks_dbg.shape)}')
+            print(f'[SAM] num_classes (from class_prompt_embed): {self.class_prompt_embed.num_embeddings + 1}')
+            self._shape_printed = True
+            self.pred_mask = masks_dbg
+            return
+
         masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
-        # masks = torch.stack([
-        #     self.postprocess_masks(low_res_masks[i], self.inp_size)
-        # for i in range(low_res_masks.shape[0])
-        # ])
-        # low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
-        # if not return_logits:
-        # if not False:
-        #     # masks = masks > self.mask_threshold
-        #     masks = masks > 0.0
         self.pred_mask = masks
 
     def infer(self, input):
         bs = input.shape[0]
-        self._compute_feat_sizes(input)  # update sizes for actual input resolution
+        self._compute_feat_sizes(input)
 
-        # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=input.device)
+        # FIX 4: Use the same class-conditioned sparse embeddings as forward().
+        # Previously infer() used an empty tensor here, so the decoder had no
+        # category signal at inference time — categories that overlapped with
+        # background were never pushed apart.
+        cls_tokens = self.class_prompt_embed.weight.unsqueeze(0).expand(bs, -1, -1)
+        sparse_embeddings = cls_tokens  # (bs, num_classes-1, prompt_embed_dim)
+
         dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
             bs, -1, self.image_embedding_size, self.image_embedding_size
         )
 
-        self.features = self.image_encoder(input)
-        if self.use_high_res_features_in_sam:
-            # precompute projected level 0 and level 1 features in SAM decoder
-            # to avoid running it again on every SAM click
-            self.features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
-                self.features["backbone_fpn"][0]
-            )
-            self.features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
-                self.features["backbone_fpn"][1]
-            )
-        self.features = self.features.copy()
-        assert len(self.features["backbone_fpn"]) == len(self.features["vision_pos_enc"])
-        assert len(self.features["backbone_fpn"]) >= self.num_feature_levels
+        self._features = self._encode_image(input)
+        high_res_features = self._features["high_res_feats"]
 
-        feature_maps = self.features["backbone_fpn"][-self.num_feature_levels :]
-        vision_pos_embeds = self.features["vision_pos_enc"][-self.num_feature_levels :]
-
-        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
-        # flatten NxCxHxW to HWxNxC
-        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
-        vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
-
-        _, vision_feats, _, _ = self.features, vision_feats, vision_pos_embeds, feat_sizes
-
-        if self.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to(vision_feats[-1].device))
-        # Use actual spatial sizes from encoder output, not stored _bb_feat_sizes,
-        # so any batch size and input resolution work correctly.
-        feats = [
-            feat.permute(1, 2, 0).reshape(bs, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
-        ][::-1]
-        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = self._features["high_res_feats"]  # list of (bs, C, H, W)
-
-        # Predict masks
-        low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
+        low_res_masks, iou_predictions, sam_output_tokens, object_score_logits = self.mask_decoder(
             image_embeddings=self._features["image_embed"],
             image_pe=self.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=True,
-            repeat_image=False,  # the image is already batched
+            repeat_image=False,
             high_res_features=high_res_features,
         )
 
-        # Upscale the masks to the original image resolution
         masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
         return masks
 
     def postprocess_masks(
         self,
         masks: torch.Tensor,
-        input_size: Tuple[int, ...],
-        original_size: Tuple[int, ...],
+        input_size,
+        original_size,
     ) -> torch.Tensor:
         """
-        Remove padding and upscale masks to the original image size.
+        Upscale low-res decoder masks to the original image size.
 
-        Arguments:
-          masks (torch.Tensor): Batched masks from the mask_decoder,
-            in BxCxHxW format.
-          input_size (tuple(int, int)): The size of the image input to the
-            model, in (H, W) format. Used to remove padding.
-          original_size (tuple(int, int)): The original size of the image
-            before resizing for input to the model, in (H, W) format.
+        masks : (B, 1, H, W) or (B, C, H, W) from the decoder.
+        input_size / original_size : int or (H, W) tuple — both are accepted.
 
-        Returns:
-          (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
-            is given by original_size.
+        Returns (B, C, H, W) float logits at original_size resolution.
         """
-        masks = torch.squeeze(masks,dim=1)
-        masks = F.interpolate(
-            masks,
-            (self.image_encoder.img_size, self.image_encoder.img_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        masks = masks[..., : input_size, : input_size]
-        masks = F.interpolate(masks, original_size, mode="bilinear", align_corners=False)
+        # Normalise size args to (H, W) tuples so F.interpolate never receives
+        # a bare int for a 4-D tensor.
+        def _to_hw(s):
+            return (s, s) if isinstance(s, int) else tuple(s)
+
+        enc_hw  = _to_hw(self.image_encoder.img_size)
+        inp_hw  = _to_hw(input_size)
+        orig_hw = _to_hw(original_size)
+
+        # The SAM2 decoder returns (B, num_tokens, num_multimask_outputs, H, W)
+        # when class-prompt tokens are used as sparse embeddings.
+        # e.g. batch=2, 4 class tokens, 1 mask output → (2, 4, 1, 128, 128)
+        # Flatten tokens × mask_outputs into a single class-channel dim → (B, C, H, W)
+        if masks.dim() == 5:
+            B, T, M, H, W = masks.shape
+            masks = masks.view(B, T * M, H, W)   # (B, num_classes, H, W)
+
+        # Shouldn't normally be anything other than 4D at this point, but guard anyway.
+        if masks.dim() == 3:
+            masks = masks.unsqueeze(1)
+
+        masks = F.interpolate(masks, enc_hw, mode="bilinear", align_corners=False)
+        masks = masks[..., : inp_hw[0], : inp_hw[1]]
+        masks = F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
         return masks
 
     def postprocess_masks2(self, masks: torch.Tensor, orig_hw) -> torch.Tensor:
@@ -426,28 +406,24 @@ class SAM(nn.Module):
         from .sam2.utils.misc import get_connected_components
 
         masks = masks.float()
-        # if self.max_hole_area > 0:
         if self.max_hole_area > 0:
-            # Holes are those connected components in background with area <= self.fill_hole_area
-            # (background regions are those with mask scores <= self.mask_threshold)
-            mask_flat = masks.flatten(0, 1).unsqueeze(1)  # flatten as 1-channel image
+            mask_flat = masks.flatten(0, 1).unsqueeze(1)
             labels, areas = get_connected_components(mask_flat <= self.mask_threshold)
             is_hole = (labels > 0) & (areas <= self.max_hole_area)
             is_hole = is_hole.reshape_as(masks)
-            # We fill holes with a small positive mask score (10.0) to change them to foreground.
             masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
 
         if self.max_sprinkle_area > 0:
             labels, areas = get_connected_components(mask_flat > self.mask_threshold)
             is_hole = (labels > 0) & (areas <= self.max_sprinkle_area)
             is_hole = is_hole.reshape_as(masks)
-            # We fill holes with negative mask score (-10.0) to change them to background.
             masks = torch.where(is_hole, self.mask_threshold - 10.0, masks)
 
         masks = F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
         return masks
+
     def backward_G(self):
-        """Calculate cross-entropy + optional IOU loss, respecting ignore pixels."""
+        """Calculate cross-entropy + soft IOU loss, respecting ignore pixels."""
         self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
         if self.loss_mode == 'iou':
             # Mask out ignore pixels (255) before computing IOU loss
@@ -460,12 +436,12 @@ class SAM(nn.Module):
 
     def optimize_parameters(self):
         self.forward()
-        self.optimizer.zero_grad()  # set G's gradients to zero
-        self.backward_G()  # calculate graidents for G
-        self.optimizer.step()  # udpate G's weights
+        self.optimizer.zero_grad()
+        self.backward_G()
+        self.optimizer.step()
 
     def set_requires_grad(self, nets, requires_grad=False):
-        """Set requies_grad=Fasle for all the networks to avoid unnecessary computations
+        """Set requires_grad for all the networks to avoid unnecessary computations.
         Parameters:
             nets (network list)   -- a list of networks
             requires_grad (bool)  -- whether the networks require gradients or not
