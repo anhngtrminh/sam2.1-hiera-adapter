@@ -100,6 +100,64 @@ class PositionEmbeddingRandom(nn.Module):
         pe = self._pe_encoding(torch.stack([x_embed, y_embed], dim=-1))
         return pe.permute(2, 0, 1)  # C x H x W
 
+# sam.py — add this class above SAM
+
+class DiceLoss(nn.Module):
+    def __init__(self, ignore_index=255, smooth=1e-6):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        # pred: (B, C, H, W) logits; target: (B, H, W) int
+        B, C, H, W = pred.shape
+        valid = target != self.ignore_index
+        t = target.clone()
+        t[~valid] = 0
+
+        prob = torch.softmax(pred, dim=1)
+        t_oh = torch.zeros_like(prob)
+        t_oh.scatter_(1, t.unsqueeze(1).clamp(0, C - 1), 1.0)
+        mask = valid.unsqueeze(1).float()
+        prob = prob * mask
+        t_oh = t_oh * mask
+
+        inter = (prob * t_oh).sum(dim=(2, 3))
+        union = prob.sum(dim=(2, 3)) + t_oh.sum(dim=(2, 3))
+        dice  = 1 - (2 * inter + self.smooth) / (union + self.smooth)
+        return dice.mean()
+
+
+class BoundaryLoss(nn.Module):
+    """Penalises errors at object edges — directly improves crispness."""
+    def __init__(self, ignore_index=255):
+        super().__init__()
+        self.ignore_index = ignore_index
+        k = torch.ones(1, 1, 3, 3)
+        self.register_buffer('kernel', k)
+
+    def _get_boundary(self, mask_onehot):
+        # mask_onehot: (B, C, H, W) float
+        B, C, H, W = mask_onehot.shape
+        flat   = mask_onehot.view(B * C, 1, H, W)
+        eroded = F.conv2d(flat, self.kernel.to(flat), padding=1)
+        boundary = (eroded < 9).float()  # pixels not fully surrounded
+        return boundary.view(B, C, H, W)
+
+    def forward(self, pred, target):
+        B, C, H, W = pred.shape
+        valid = target != self.ignore_index
+        t = target.clone(); t[~valid] = 0
+        t_oh = torch.zeros_like(pred)
+        t_oh.scatter_(1, t.unsqueeze(1).clamp(0, C - 1), 1.0)
+        boundary = self._get_boundary(t_oh)
+
+        prob = torch.softmax(pred, dim=1)
+        # Weight CE heavily at boundary pixels
+        boundary_weight = 1.0 + 4.0 * boundary.max(dim=1).values
+        loss = F.cross_entropy(pred, t, ignore_index=self.ignore_index, reduction='none')
+        loss = (loss * boundary_weight * valid.float()).sum() / (valid.float().sum() + 1e-6)
+        return loss
 
 @register('sam')
 class SAM(nn.Module):
@@ -201,18 +259,21 @@ class SAM(nn.Module):
                 if "prompt" not in k and "mask_decoder" not in k and "prompt_encoder" not in k:
                     p.requires_grad = False
 
-        self.loss_mode = loss
-        if self.loss_mode == 'bce':
-            self.criterionBCE = torch.nn.BCEWithLogitsLoss()
+        # self.loss_mode = loss
+        # if self.loss_mode == 'bce':
+        #     self.criterionBCE = torch.nn.BCEWithLogitsLoss()
 
-        elif self.loss_mode == 'bbce':
-            self.criterionBCE = BBCEWithLogitLoss()
+        # elif self.loss_mode == 'bbce':
+        #     self.criterionBCE = BBCEWithLogitLoss()
 
-        elif self.loss_mode == 'iou':
-            # ignore_index=255 handles pixels masked by ignore_bg=true in the dataloader
-            # and also naturally handles class-imbalance by excluding background
-            self.criterionBCE = torch.nn.CrossEntropyLoss(ignore_index=255)
-            self.criterionIOU = IOU()
+        # elif self.loss_mode == 'iou':
+        #     # ignore_index=255 handles pixels masked by ignore_bg=true in the dataloader
+        #     # and also naturally handles class-imbalance by excluding background
+        #     self.criterionBCE = torch.nn.CrossEntropyLoss(ignore_index=255)
+        #     self.criterionIOU = IOU()
+        self.criterionCE    = nn.CrossEntropyLoss(ignore_index=255)
+        self.criterionDice  = DiceLoss(ignore_index=255)
+        self.criterionBound = BoundaryLoss(ignore_index=255)
 
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
@@ -422,21 +483,32 @@ class SAM(nn.Module):
         masks = F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
         return masks
 
+    # def backward_G(self):
+    #     """Calculate cross-entropy + soft IOU loss, respecting ignore pixels."""
+    #     self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
+    #     if self.loss_mode == 'iou':
+    #         # Mask out ignore pixels (255) before computing IOU loss
+    #         valid = (self.gt_mask != 255)
+    #         if valid.any():
+    #             self.loss_G = self.loss_G + _iou_loss(
+    #                 self.pred_mask, self.gt_mask, valid
+    #             )
+    #     self.loss_G.backward()
     def backward_G(self):
-        """Calculate cross-entropy + soft IOU loss, respecting ignore pixels."""
-        self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
-        if self.loss_mode == 'iou':
-            # Mask out ignore pixels (255) before computing IOU loss
-            valid = (self.gt_mask != 255)
-            if valid.any():
-                self.loss_G = self.loss_G + _iou_loss(
-                    self.pred_mask, self.gt_mask, valid
-                )
+        ce    = self.criterionCE(self.pred_mask, self.gt_mask)
+        dice  = self.criterionDice(self.pred_mask, self.gt_mask)
+        bound = self.criterionBound(self.pred_mask, self.gt_mask)
+        self.loss_G = ce + dice + 0.5 * bound
         self.loss_G.backward()
 
+    # def optimize_parameters(self):
+    #     self.forward()
+    #     self.optimizer.zero_grad()
+    #     self.backward_G()
+    #     self.optimizer.step()
     def optimize_parameters(self):
+        self.optimizer.zero_grad()   # ← moved HERE, before forward
         self.forward()
-        self.optimizer.zero_grad()
         self.backward_G()
         self.optimizer.step()
 
