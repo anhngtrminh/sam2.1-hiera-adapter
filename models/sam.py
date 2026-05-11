@@ -66,6 +66,31 @@ def _iou_loss(pred, target, valid=None):
     iou = 1 - (inter / (union + 1e-6))
     return iou.mean()
 
+def _dice_loss(pred_logits, target, ignore_index=255):
+    """Soft multi-class Dice loss."""
+    pred = torch.softmax(pred_logits, dim=1)   # (B, C, H, W)
+    B, C, H, W = pred.shape
+    
+    valid = (target != ignore_index)
+    t = target.clone()
+    t[~valid] = 0
+    
+    t_onehot = torch.zeros_like(pred)
+    t_onehot.scatter_(1, t.unsqueeze(1).clamp(0, C - 1), 1.0)
+    
+    # Zero out ignored pixels
+    mask = valid.unsqueeze(1).float()
+    pred = pred * mask
+    t_onehot = t_onehot * mask
+    
+    # Skip background (class 0) — focus dice on foreground classes
+    pred, t_onehot = pred[:, 1:], t_onehot[:, 1:]
+    
+    inter = (pred * t_onehot).sum(dim=(2, 3))
+    union = pred.sum(dim=(2, 3)) + t_onehot.sum(dim=(2, 3))
+    dice = 1 - (2 * inter + 1e-6) / (union + 1e-6)
+    return dice.mean()
+
 class PositionEmbeddingRandom(nn.Module):
     """
     Positional encoding using random spatial frequencies.
@@ -211,8 +236,10 @@ class SAM(nn.Module):
         elif self.loss_mode == 'iou':
             # ignore_index=255 handles pixels masked by ignore_bg=true in the dataloader
             # and also naturally handles class-imbalance by excluding background
-            self.criterionBCE = torch.nn.CrossEntropyLoss(ignore_index=255)
-            self.criterionIOU = IOU()
+            self.criterionBCE = torch.nn.CrossEntropyLoss(
+                ignore_index=255,
+                label_smoothing=0.1    # prevents overconfident wrong predictions
+            )
 
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
@@ -423,15 +450,11 @@ class SAM(nn.Module):
         return masks
 
     def backward_G(self):
-        """Calculate cross-entropy + soft IOU loss, respecting ignore pixels."""
-        self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
-        if self.loss_mode == 'iou':
-            # Mask out ignore pixels (255) before computing IOU loss
-            valid = (self.gt_mask != 255)
-            if valid.any():
-                self.loss_G = self.loss_G + _iou_loss(
-                    self.pred_mask, self.gt_mask, valid
-                )
+        valid = (self.gt_mask != 255)
+        # Label smoothing: pass smoothing to CE
+        ce = self.criterionBCE(self.pred_mask, self.gt_mask)
+        dice = _dice_loss(self.pred_mask, self.gt_mask)
+        self.loss_G = ce + dice          # equal weight works well as a starting point
         self.loss_G.backward()
 
     def optimize_parameters(self):
