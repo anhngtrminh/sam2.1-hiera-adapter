@@ -624,15 +624,15 @@ def prepare_training(device):
         log('WARNING: sam_checkpoint not found — training from scratch.')
 
     # Freeze image encoder; adapters + prompt generator stay trainable
+    # In prepare_training(), replace the freeze block:
     if config.get('freeze_encoder', True):
-        # for name, param in model.named_parameters():
-        #     if 'image_encoder' in name and 'prompt_generator' not in name:
-        #         param.requires_grad_(False)
         for name, param in model.named_parameters():
-            if 'image_encoder' in name:
-                # Freeze trunk (Hiera) but keep neck trainable
-                if 'trunk' in name and 'prompt_generator' not in name:
+            if 'image_encoder' in name and 'trunk' in name:
+                # Freeze only early stages (0, 1); unfreeze later stages
+                if any(f'blocks.{i}.' in name or f'stage_{i}' in name 
+                    for i in range(2)):   # freeze first 2 stages only
                     param.requires_grad_(False)
+                # neck and prompt_generator remain trainable (default)
 
     if is_main:
         total = sum(p.numel() for p in model.parameters())
@@ -653,6 +653,18 @@ def prepare_training(device):
     lr_scheduler = CosineAnnealingLR(
         optimizer, T_max=config['epoch_max'], eta_min=config.get('lr_min', 1e-7)
     )
+    ##
+    trunk_params   = [p for n, p in model.named_parameters()
+                    if 'trunk' in n and p.requires_grad]
+    other_params   = [p for n, p in model.named_parameters()
+                    if 'trunk' not in n and p.requires_grad]
+
+    base_lr = config['optimizer']['args']['lr']
+    optimizer = torch.optim.AdamW([
+        {'params': trunk_params,  'lr': base_lr * 0.1},
+        {'params': other_params,  'lr': base_lr},
+    ], weight_decay=config['optimizer']['args'].get('weight_decay', 1e-4))
+    ##
     return model, optimizer, epoch_start, lr_scheduler
 
 
