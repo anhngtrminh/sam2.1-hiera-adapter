@@ -284,12 +284,12 @@ class SAM(nn.Module):
                 if "prompt" not in k and "mask_decoder" not in k and "prompt_encoder" not in k:
                     p.requires_grad = False
 
-        # self.loss_mode = loss
-        # if self.loss_mode == 'bce':
-        #     self.criterionBCE = torch.nn.BCEWithLogitsLoss()
+        self.loss_mode = loss
+        if self.loss_mode == 'bce':
+            self.criterionBCE = torch.nn.BCEWithLogitsLoss()
 
-        # elif self.loss_mode == 'bbce':
-        #     self.criterionBCE = BBCEWithLogitLoss()
+        elif self.loss_mode == 'bbce':
+            self.criterionBCE = BBCEWithLogitLoss()
 
         elif self.loss_mode == 'iou':
             # ignore_index=255 handles pixels masked by ignore_bg=true in the dataloader
