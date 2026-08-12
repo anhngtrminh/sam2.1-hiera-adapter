@@ -31,7 +31,12 @@ split_preparation:
   source_dir:    data
   coco_root:     cdw_coco   # splits will be written here
   source_images_subdir:  train        # ← already correct
-  source_ann_file:  data/annotations.json  # ← point directly to this
+  # After merging no-bag images:
+  #   python scripts/add_nobag_to_coco.py --ann data/annotations.json \
+  #     --nobag-dir <NOBAG_DIR> --images-dir data/train \
+  #     --out-ann data/annotations_with_nobag.json
+  # then point source_ann_file to the new JSON and --force-prepare.
+  source_ann_file:  data/annotations.json  # ← or data/annotations_with_nobag.json
   train_ratio: 0.85
   val_ratio:   0.15
   test_ratio:  0

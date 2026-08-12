@@ -350,14 +350,19 @@ def _filter_coco_to_categories(data: dict, chosen_names: list | None) -> dict:
     kept_cat_ids = {c['id'] for c in kept_cats}
     kept_anns    = [a for a in data['annotations']
                     if a['category_id'] in kept_cat_ids]
-    kept_img_ids = {a['image_id'] for a in kept_anns}
+    # Keep true no-bag / empty images (zero annotations before filtering)
+    originally_empty = (
+        {im['id'] for im in data['images']}
+        - {a['image_id'] for a in data['annotations']}
+    )
+    kept_img_ids = {a['image_id'] for a in kept_anns} | originally_empty
     kept_imgs    = [im for im in data['images'] if im['id'] in kept_img_ids]
 
     print(f'[filter] chosen_categories={chosen_names}')
     print(f'[filter]  kept {len(kept_cats)} categories, '
           f'{len(kept_imgs)} images, {len(kept_anns)} annotations '
           f'(dropped {len(data["images"]) - len(kept_imgs)} images with no '
-          f'matching annotations).')
+          f'matching annotations; kept {len(originally_empty)} empty/no-bag).')
 
     return {
         **data,
@@ -419,13 +424,19 @@ class COCOSegDataset(Dataset):
         self.coco    = COCO(ann_path)
         self.img_dir = os.path.join(coco_root, 'images', split)
 
+        # Snapshot true empty/no-bag images BEFORE optional category filtering
+        # (images that lose all labels due to filtering must not count as no-bag).
+        all_ids = set(self.coco.getImgIds())
+        empty_ids = all_ids - {
+            a['image_id'] for a in self.coco.dataset.get('annotations', [])
+        }
+
         # ── Optionally restrict to a subset of categories ─────────────────────
         # If chosen_categories is given, remove all other cats from the COCO
         # object so that downstream annotation loading ignores them.
         if chosen_categories:
             chosen_set  = set(chosen_categories)
             all_cats    = self.coco.loadCats(self.coco.getCatIds())
-            drop_ids    = {c['id'] for c in all_cats if c['name'] not in chosen_set}
             keep_ids    = {c['id'] for c in all_cats if c['name'] in chosen_set}
             if not keep_ids:
                 raise ValueError(
@@ -466,11 +477,15 @@ class COCOSegDataset(Dataset):
                 log(f'  JSON cat_id={cid} -> class_idx={cidx}'
                     f'  ({self.class_names[cidx]})')
 
-        ann_img_ids   = {a['image_id'] for a in self.coco.dataset.get('annotations', [])}
-        self.img_ids  = sorted(ann_img_ids & set(self.coco.getImgIds()))
+        # Keep annotated images + intentional empty/no-bag images
+        ann_img_ids  = {a['image_id'] for a in self.coco.dataset.get('annotations', [])}
+        self.img_ids = sorted((ann_img_ids | empty_ids) & set(self.coco.getImgIds()))
+        n_empty = len(set(self.img_ids) & empty_ids)
+        if is_main and n_empty:
+            log(f'[{split}] including {n_empty} empty/no-bag images')
         if not self.img_ids:
             raise RuntimeError(
-                f'No annotated images in {ann_path} '
+                f'No images in {ann_path} '
                 f'(after chosen_categories filter={chosen_categories})'
             )
 
