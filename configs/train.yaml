@@ -138,6 +138,11 @@ early_stopping:
 # Evaluation
 # -----------------------------------------------------------------------------
 eval_type: seg
+# No-bag false-positive metric (image-level):
+# An image is "no-bag" when GT has no foreground pixels.  It counts as FP when
+# predicted foreground area / image area > area_thresh.
+no_bag_fp:
+  area_thresh: 0.001   # 0.1% of image; ignore tiny noise
 data_norm:
   inp:
     sub: [0.5]

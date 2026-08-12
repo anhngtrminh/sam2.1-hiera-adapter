@@ -28,7 +28,7 @@ import seaborn as sns
 """
 refer to https://github.com/jfzhang95/pytorch-deeplab-xception/blob/master/utils/metrics.py
 """
-__all__ = ['SegmentationMetric']
+__all__ = ['SegmentationMetric', 'NoBagFPMetric']
  
 """
 confusionMetric
@@ -39,6 +39,60 @@ P      TP    FN
 N      FP    TN
  
 """
+
+
+class NoBagFPMetric(object):
+    """
+    Image-level false-positive rate on "no-bag" samples.
+
+    A sample is treated as no-bag when GT has no foreground pixels
+    (class index > 0, excluding ignore_index 255).  It counts as FP when the
+    predicted foreground area ratio exceeds ``area_thresh``.
+    """
+
+    def __init__(self, area_thresh: float = 0.001):
+        self.area_thresh = float(area_thresh)
+        self.reset()
+
+    def reset(self):
+        self.n_no_bag = 0
+        self.n_fp = 0
+        self.fg_ratios = []
+
+    def add(self, pred_idx: np.ndarray, gt_idx: np.ndarray):
+        """
+        Args:
+            pred_idx: (H, W) predicted class indices
+            gt_idx:   (H, W) ground-truth class indices (255 = ignore)
+        """
+        gt_fg = (gt_idx > 0) & (gt_idx != 255)
+        if gt_fg.any():
+            return  # has bag / foreground content — skip
+
+        self.n_no_bag += 1
+        pred_fg_ratio = float((pred_idx > 0).mean())
+        self.fg_ratios.append(pred_fg_ratio)
+        if pred_fg_ratio > self.area_thresh:
+            self.n_fp += 1
+
+    def result(self) -> dict:
+        if self.n_no_bag == 0:
+            return {
+                'n_no_bag': 0,
+                'n_fp': 0,
+                'fp_rate': float('nan'),
+                'mean_fg_ratio': float('nan'),
+                'area_thresh': self.area_thresh,
+            }
+        return {
+            'n_no_bag': self.n_no_bag,
+            'n_fp': self.n_fp,
+            'fp_rate': self.n_fp / self.n_no_bag,
+            'mean_fg_ratio': float(np.mean(self.fg_ratios)),
+            'area_thresh': self.area_thresh,
+        }
+
+
 class SegmentationMetric(object):
     def __init__(self, numClass,ignore_bg):
         self.numClass = numClass

@@ -60,7 +60,7 @@ from tqdm import tqdm
 
 import models
 import utils
-from eval_iou import SegmentationMetric
+from eval_iou import NoBagFPMetric, SegmentationMetric
 
 # ── Globals (set in main) ──────────────────────────────────────────────────────
 config     = None
@@ -708,12 +708,14 @@ def train_one_epoch(loader, model, optimizer, scaler, epoch, device, distributed
 @torch.no_grad()
 def evaluate(val_loader, model, device):
     if val_loader is None:
-        return None, None, None
+        return None, None, None, None
 
     model.eval()
     classes    = config['_class_names']   # derived from JSON, not YAML
     ignore_bg  = config.get('ignore_bg', False)
     metric_seg = SegmentationMetric(config['_num_classes'], ignore_bg)
+    nobag_cfg  = config.get('no_bag_fp') or {}
+    metric_nobag = NoBagFPMetric(area_thresh=nobag_cfg.get('area_thresh', 0.001))
     pbar       = tqdm(total=len(val_loader), leave=False, desc='val') if is_main else None
 
     for batch in val_loader:
@@ -722,8 +724,12 @@ def evaluate(val_loader, model, device):
         gt     = batch['gt'].cpu()                                  # (B, H, W)
 
         for i in range(pred.shape[0]):
-            pred_idx = pred[i].argmax(dim=0).numpy().flatten()
-            gt_idx   = gt[i].numpy().flatten()
+            pred_map = pred[i].argmax(dim=0).numpy()
+            gt_map   = gt[i].numpy()
+            metric_nobag.add(pred_map, gt_map)
+
+            pred_idx = pred_map.flatten()
+            gt_idx   = gt_map.flatten()
             valid    = gt_idx != 255
             metric_seg.addBatch(pred_idx[valid], gt_idx[valid])
 
@@ -743,6 +749,7 @@ def evaluate(val_loader, model, device):
     normed_cm = np.around(
         metric_seg.confusionMatrix / (metric_seg.confusionMatrix.sum(axis=0) + 1e-8), 3
     )
+    nobag = metric_nobag.result()
 
     labels    = classes[1:] if ignore_bg else classes
     table     = PrettyTable(['Metric', 'Mean'] + list(labels))
@@ -753,7 +760,20 @@ def evaluate(val_loader, model, device):
     table.add_row(['OA',        oa]             + [' '] * len(labels))
     table.add_row(['FwIoU',     fwIoU]          + [' '] * len(labels))
 
-    return float(mIoU), str(table), normed_cm
+    if nobag['n_no_bag'] == 0:
+        nobag_str = (
+            f'NoBag-FP: n/a (0 no-bag images in val; '
+            f'area_thresh={nobag["area_thresh"]})'
+        )
+    else:
+        nobag_str = (
+            f'NoBag-FP: rate={nobag["fp_rate"]:.4f}  '
+            f'({nobag["n_fp"]}/{nobag["n_no_bag"]} images)  '
+            f'mean_fg_ratio={nobag["mean_fg_ratio"]:.4f}  '
+            f'area_thresh={nobag["area_thresh"]}'
+        )
+
+    return float(mIoU), str(table) + '\n' + nobag_str, normed_cm, nobag
 
 
 # =============================================================================
@@ -861,11 +881,19 @@ def main(config_: dict, save_path: str):
 
         if epoch_val and epoch % epoch_val == 0:
             _m = model.module if hasattr(model, 'module') else model
-            mIoU, table_str, confusion = evaluate(val_loader, _m, device)
+            mIoU, table_str, confusion, nobag = evaluate(val_loader, _m, device)
 
             if is_main and mIoU is not None:
                 writer.add_scalar('val/mIoU', mIoU, epoch)
                 log_parts.append(f'val_mIoU={mIoU:.4f}')
+                if nobag and nobag['n_no_bag'] > 0:
+                    writer.add_scalar('val/no_bag_fp_rate', nobag['fp_rate'], epoch)
+                    writer.add_scalar('val/no_bag_mean_fg_ratio',
+                                     nobag['mean_fg_ratio'], epoch)
+                    writer.add_scalar('val/no_bag_n', nobag['n_no_bag'], epoch)
+                    log_parts.append(f'no_bag_fp={nobag["fp_rate"]:.4f}')
+                elif nobag is not None:
+                    log_parts.append('no_bag_fp=n/a')
 
                 if mIoU > best_mIoU:
                     best_mIoU = mIoU
